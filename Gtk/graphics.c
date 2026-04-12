@@ -251,7 +251,7 @@ static void erik_capture (void)
     g_clear_object (&pixbuf);
     if (old_frame)
     {
-    show_picture (635);
+	show_picture (635);
 	if (saved_frame && frameWidth == old_frame_width && frameHeight == old_frame_height)
 	    memcpy (frameBuffer, saved_frame, saved_size);
 	memcpy (imagePalette, saved_palette, sizeof (imagePalette));
@@ -302,30 +302,33 @@ static void display_picture ()
 	rgbBuffer, GDK_COLORSPACE_RGB, FALSE, 8, bitmapWidth, bitmapHeight,
 	3 * frameWidth, NULL, NULL);
 
-    gdouble scale = 1.0;
-    if (!erik_capturing && Config.fit_to_window)
     {
-	GtkAllocation a;
-	gtk_widget_get_allocation (Gui.picture_area, &a);
-	gdouble total_width = (is_erik () && erik_panel)
-	    ? bitmapWidth * (1.0 + 364.0 / 598.0)
-	    : bitmapWidth;
-	gdouble ws = (gdouble) a.width / total_width;
-	gdouble hs = (gdouble) a.height / bitmapHeight;
-	scale = MIN (ws, hs);
-    }
-    else if (!erik_capturing && Config.image_scale != 1.0)
-	scale = Config.image_scale;
+	gdouble scale = 1.0;
 
-    if (scale != 1.0)
-    {
-	GdkPixbuf *s = gdk_pixbuf_scale_simple (
-	    pixbuf,
-	    MAX ((gint) ((gdouble) bitmapWidth * scale + 0.5), 1),
-	    MAX ((gint) ((gdouble) bitmapHeight * scale + 0.5), 1),
-	    Config.image_filter);
-	g_object_unref (pixbuf);
-	pixbuf = s;
+	if (!erik_capturing && Config.fit_to_window)
+	{
+	    GtkAllocation a;
+	    gtk_widget_get_allocation (Gui.picture_area, &a);
+	    gdouble total_width = (is_erik () && erik_panel)
+		? bitmapWidth * (1.0 + 364.0 / 598.0)
+		: bitmapWidth;
+	    gdouble ws = (gdouble) a.width / total_width;
+	    gdouble hs = (gdouble) a.height / (gdouble) bitmapHeight;
+	    scale = MIN (ws, hs);
+	}
+	else if (!erik_capturing && Config.image_scale != 1.0)
+	    scale = Config.image_scale;
+
+	if (scale != 1.0)
+	{
+	    GdkPixbuf *s = gdk_pixbuf_scale_simple (
+		pixbuf,
+		MAX ((gint) ((gdouble) bitmapWidth * scale + 0.5), 1),
+		MAX ((gint) ((gdouble) bitmapHeight * scale + 0.5), 1),
+		Config.image_filter);
+	    g_object_unref (pixbuf);
+	    pixbuf = s;
+	}
     }
 
     if (is_erik () && erik_panel)

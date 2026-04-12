@@ -22,6 +22,7 @@
 #define CM_PASTE                        210
 #define CM_DITHER                       211
 #define CM_FITTOWINDOW                  212
+#define CM_PRESERVEASPECT               213
 
 // Next default values for new objects
 // 
