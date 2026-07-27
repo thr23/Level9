@@ -32,6 +32,17 @@
 
 #include "level9.h"
 
+extern "C" {
+extern L9BYTE* startdata;
+extern L9UINT32 FileSize;
+void show_picture(int pic);
+extern L9BYTE* gfxa5;
+extern int gintcolour,option,reflectflag,scale;
+extern int drawx,drawy;
+extern int l9textmode,screencalled,gfx_mode;
+extern int GfxA5StackPos,GfxScaleStackPos;
+}
+
 // define application name, main window title
 #define AppName "Level9"
 #define MainWinTitle "Level9"
@@ -65,6 +76,7 @@ int GfxHeight=0;
 int GfxPicWidth=0,GfxPicHeight=0;
 BOOL GfxDither=FALSE;
 BOOL GfxFitToWindow=FALSE;
+BOOL GfxPreserveAspect=FALSE;
 HBITMAP hGfx=0,hGfxDraw=0;
 HDC hGfxDC=0,hGfxDrawDC=0;
 int FontHeight=0,LineSpacing=0;
@@ -78,6 +90,16 @@ SimpleList<int> InputChars;
 int iPos=0,Input=0;
 String Hash(20);
 FName LastFile;
+FName GfxDir;
+BitmapType GfxBmapType = NO_BITMAPS;
+BYTE* GfxBits = NULL;
+int GfxBmapWidth = 0, GfxBmapHeight = 0;
+int LastBitmap = -1, DelayBitmap = 0;
+
+static HBITMAP ErikPanelLeft = 0;
+static HBITMAP ErikPanelRight = 0;
+static int ErikPanelCachedPanelW=0,ErikPanelCachedBarW=0,ErikPanelCachedH=0;
+static BOOL ErikCapturing = FALSE;
 
 /*#define L9PRINT*/
 
@@ -92,6 +114,13 @@ void LogPrint(char *Str,int Len)
 }
 
 void DrawPicture(void);
+
+static BYTE* ErikPanelBits = NULL;
+static int ErikPanelWidth = 0, ErikPanelHeight = 0;
+
+#define LineGfxPreserveAspect() (GfxMode == 1 && GfxPreserveAspect && GfxPicWidth > 0 && GfxPicHeight > 0)
+#define ErikDelBmp(b) do { if (b) { DeleteObject(b); (b) = 0; } } while (0)
+#define ClampPictureVerticallyInGfx(y,h) do { if ((y) < 0) (y) = 0; if ((y)+(h) > GfxHeight) (h) = max(1, GfxHeight - (y)); } while (0)
 
 void DisplayLine(int Line,char *Str,int Len)
 {
@@ -532,12 +561,12 @@ void Resize()
     DeleteObject(hClip);
   hClip=CreateRectRgn(0,GfxHeight,PageWidth,WndHeight);
 
-  if (hGfxDraw)
-    DeleteObject(hGfxDraw);
-  hGfxDraw = 0;
   if (hGfxDrawDC)
     DeleteDC(hGfxDrawDC);
   hGfxDrawDC = 0;
+  if (hGfxDraw)
+    DeleteObject(hGfxDraw);
+  hGfxDraw = 0;
 
   Paginate();
   InvalidateRect(hWndMain,NULL,TRUE);
@@ -634,7 +663,7 @@ L9BOOL os_find_file(char* NewName)
 
 typedef struct tagBITMAPINFO32
 {
-  BITMAPINFOHEADER bmiHeader; 
+  BITMAPINFOHEADER bmiHeader;
   RGBQUAD bmiColors[32];
 }
 BITMAPINFO32;
@@ -668,47 +697,416 @@ void SetIndexPalette(RGBQUAD* pal)
   }
 }
 
+static HBITMAP CreateIndexedDib(HDC dc,int width,int height,BYTE** outBits)
+{
+  BITMAPINFO32 info;
+  ZeroMemory(&info,sizeof(BITMAPINFO32));
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 8;
+  info.bmiHeader.biCompression = BI_RGB;
+  info.bmiHeader.biWidth = width;
+  info.bmiHeader.biHeight = -height;
+  info.bmiHeader.biClrUsed = 32;
+  info.bmiHeader.biClrImportant = 32;
+  SetIndexPalette(info.bmiColors);
+  return CreateDIBSection(dc,(BITMAPINFO*)&info,DIB_RGB_COLORS,(VOID**)outBits,NULL,0);
+}
+
+static void DrawMainWithGutters(HDC dc,HBRUSH bkBr,HDC srcDC,
+  int gutterL,int gutterR,int mx,int my,int mw,int mh)
+{
+  int bot = my + mh;
+  if (my > 0)
+  {
+    RECT r = {0,0,PageWidth,my};
+    FillRect(dc,&r,bkBr);
+  }
+  if (bot < GfxHeight)
+  {
+    RECT r = {0,bot,PageWidth,GfxHeight};
+    FillRect(dc,&r,bkBr);
+  }
+  if (mh > 0)
+  {
+    if (gutterL > 0)
+    {
+      RECT r = {0,my,gutterL,bot};
+      FillRect(dc,&r,bkBr);
+    }
+    if (gutterR < PageWidth)
+    {
+      RECT r = {gutterR,my,PageWidth,bot};
+      FillRect(dc,&r,bkBr);
+    }
+    BitBlt(dc,mx,my,mw,mh,srcDC,mx,my,SRCCOPY);
+  }
+}
+
+static double MinScaleToFit(double availW, double availH, double srcW, double srcH)
+{
+  double sW = availW / srcW;
+  double sH = availH / srcH;
+  return sW < sH ? sW : sH;
+}
+
+#define ScalePictureToBox(BW,BH,SW,SH,PW,PH) do { \
+  double _s = MinScaleToFit((double)(BW),(double)(BH),(double)(SW),(double)(SH)); \
+  *(PW) = max(1,(int)((SW) * _s + 0.5)); \
+  *(PH) = max(1,(int)((SH) * _s + 0.5)); \
+  if (*(PW) > (BW)) *(PW) = (BW); \
+  if (*(PH) > (BH)) *(PH) = (BH); \
+} while (0)
+
+static BOOL L9IsErik(void)
+{
+  int i;
+  int isV2;
+  L9UINT16 len;
+  L9BYTE sum;
+
+  if (!startdata || FileSize < 30)
+    return FALSE;
+
+  isV2 = ((startdata[4] == 0x20 && startdata[5] == 0x00)
+          || (startdata[6] == 0x20 && startdata[7] == 0x00))
+      && ((startdata[10] == 0x00 && startdata[11] == 0x80)
+          || (startdata[8] == 0x00 && startdata[9] == 0x80))
+      && startdata[20] == startdata[22]
+      && startdata[21] == startdata[23];
+
+  len = isV2 ? (L9UINT16)(startdata[28] | (startdata[29] << 8))
+             : (L9UINT16)(startdata[0] | (startdata[1] << 8));
+
+  if (len >= FileSize)
+    return FALSE;
+
+  if (isV2)
+  {
+    sum = 0;
+    for (i = 0; i < (int)len + 1; i++)
+      sum += startdata[i];
+  }
+  else
+    sum = startdata[len];
+
+  return len == 0x34b3 && sum == 0x53;
+}
+
+static void FreeErikPanelResources(void)
+{
+  ErikDelBmp(ErikPanelLeft);
+  ErikDelBmp(ErikPanelRight);
+
+  if (ErikPanelBits)
+    free(ErikPanelBits);
+  ErikPanelBits = NULL;
+  ErikPanelWidth = 0;
+  ErikPanelHeight = 0;
+
+  ErikPanelCachedPanelW = 0;
+  ErikPanelCachedBarW = 0;
+  ErikPanelCachedH = 0;
+}
+
+static void ErikPanelStretchStripDib(HDC destDC,
+  int destX, int destY, int destWidth, int destHeight,
+  int capturedPixelW, int capturedPixelH,
+  int coverWidth, int coverHeight,
+  BYTE* dibBits, BITMAPINFO* dibInfo)
+{
+  double coverScaleW = (double)coverWidth / capturedPixelW;
+  double coverScaleH = (double)coverHeight / capturedPixelH;
+  double coverScale = coverScaleH > coverScaleW ? coverScaleH : coverScaleW;
+  int scaledTotalW = max(1,(int)(capturedPixelW * coverScale + 0.5));
+  int scaledTotalH = max(1,(int)(capturedPixelH * coverScale + 0.5));
+  int cropOriginX = scaledTotalW > coverWidth ? (scaledTotalW - coverWidth) / 2 : 0;
+  int cropOriginY = scaledTotalH > coverHeight ? (scaledTotalH - coverHeight) / 2 : 0;
+  int srcX = (cropOriginX * capturedPixelW) / scaledTotalW;
+  int srcY = (cropOriginY * capturedPixelH) / scaledTotalH;
+  int srcW = (coverWidth * capturedPixelW + scaledTotalW / 2) / scaledTotalW;
+  int srcH = (coverHeight * capturedPixelH + scaledTotalH / 2) / scaledTotalH;
+  if (srcW < 1) srcW = 1;
+  if (srcH < 1) srcH = 1;
+  if (srcX + srcW > capturedPixelW) srcW = capturedPixelW - srcX;
+  if (srcY + srcH > capturedPixelH) srcH = capturedPixelH - srcY;
+  if (srcW < 1 || srcH < 1) return;
+  StretchDIBits(destDC,destX,destY,destWidth,destHeight,srcX,srcY,srcW,srcH,
+    dibBits,dibInfo,DIB_RGB_COLORS,SRCCOPY);
+}
+
+static void DrawErikPanelStrip(HDC dc,int x,int y,int width,int height)
+{
+  if (!ErikPanelBits || width <= 0 || height <= 0)
+    return;
+
+  BITMAPINFO info;
+  ZeroMemory(&info,sizeof(info));
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  int capturedPixelW = ErikPanelWidth, capturedPixelH = ErikPanelHeight;
+  if (capturedPixelW <= 0 || capturedPixelH <= 0)
+    return;
+
+  info.bmiHeader.biWidth = capturedPixelW;
+  info.bmiHeader.biHeight = -capturedPixelH;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 24;
+  info.bmiHeader.biCompression = BI_RGB;
+
+  if (!LineGfxPreserveAspect())
+  {
+    ErikPanelStretchStripDib(dc,x,y,width,height,capturedPixelW,capturedPixelH,
+      max(1,(int)(GfxPicWidth * 0.2977 + 0.5)),max(1,GfxPicHeight),ErikPanelBits,&info);
+    return;
+  }
+
+  ErikPanelStretchStripDib(dc,x,y,width,height,capturedPixelW,capturedPixelH,
+    width,height,ErikPanelBits,&info);
+}
+
+static void ErikPanelArtEnsure(HDC screenDC,int panelW,int barW,int h)
+{
+  if (!ErikPanelBits || panelW <= 0 || barW <= 0 || h <= 0)
+    return;
+
+  if (ErikPanelLeft && ErikPanelRight
+    && ErikPanelCachedPanelW == panelW && ErikPanelCachedBarW == barW
+    && ErikPanelCachedH == h)
+    return;
+
+  int stripeW = panelW + barW;
+
+  HBITMAP newSideStripBitmaps[2] = {
+    CreateCompatibleBitmap(screenDC, stripeW, h),
+    CreateCompatibleBitmap(screenDC, stripeW, h),
+  };
+  if (!newSideStripBitmaps[0] || !newSideStripBitmaps[1])
+  {
+    if (newSideStripBitmaps[0]) DeleteObject(newSideStripBitmaps[0]);
+    if (newSideStripBitmaps[1]) DeleteObject(newSideStripBitmaps[1]);
+    return;
+  }
+
+  HDC mem = CreateCompatibleDC(screenDC);
+  if (!mem)
+  {
+    DeleteObject(newSideStripBitmaps[0]);
+    DeleteObject(newSideStripBitmaps[1]);
+    return;
+  }
+
+  HBITMAP old = (HBITMAP)SelectObject(mem,newSideStripBitmaps[0]);
+  RECT rPanel = {0,0,panelW,h};
+  RECT rBar = {panelW,0,stripeW,h};
+  HBRUSH panelYellowBrush = CreateSolidBrush(RGB(255,255,0));
+  FillRect(mem,&rPanel,panelYellowBrush);
+  FillRect(mem,&rBar,(HBRUSH)GetStockObject(BLACK_BRUSH));
+  DrawErikPanelStrip(mem,0,0,panelW,h);
+
+  SelectObject(mem,newSideStripBitmaps[1]);
+  RECT rBarR = {0,0,barW,h};
+  RECT rPanR = {barW,0,stripeW,h};
+  FillRect(mem,&rBarR,(HBRUSH)GetStockObject(BLACK_BRUSH));
+  FillRect(mem,&rPanR,panelYellowBrush);
+  DrawErikPanelStrip(mem,barW,0,panelW,h);
+  DeleteObject(panelYellowBrush);
+
+  SelectObject(mem,old);
+  DeleteDC(mem);
+
+  ErikDelBmp(ErikPanelLeft);
+  ErikDelBmp(ErikPanelRight);
+  ErikPanelLeft = newSideStripBitmaps[0];
+  ErikPanelRight = newSideStripBitmaps[1];
+
+  ErikPanelCachedPanelW = panelW;
+  ErikPanelCachedBarW = barW;
+  ErikPanelCachedH = h;
+}
+
+static void CaptureErikPanel(void)
+{
+  if (ErikPanelBits || !hGfxDC || !GfxBits)
+    return;
+
+  if (ErikCapturing)
+    return;
+  ErikCapturing = TRUE;
+
+  HDC tempDC = 0;
+  HBITMAP tempBmp = 0;
+  HBITMAP oldTempBmp = 0;
+  BOOL captured = TRUE;
+
+  if (!(GfxPicWidth > 0 && GfxPicHeight > 0 && GfxBmapWidth > 0))
+    goto done;
+
+  int savedGfxMode = GfxMode;
+  BitmapType savedGfxBmapType = GfxBmapType;
+  int savedL9TextMode = l9textmode;
+  int savedScreencalled = screencalled;
+  int savedGfxModeCore = gfx_mode;
+
+  int savedWidth = GfxPicWidth;
+  int savedHeight = GfxPicHeight;
+  int savedBitmap = LastBitmap;
+  int savedDelay = DelayBitmap;
+  int savedBmapWidth = GfxBmapWidth;
+  int savedBmapHeight = GfxBmapHeight;
+
+  HDC savedGfxDC = hGfxDC;
+  HBITMAP savedGfx = hGfx;
+  BYTE* savedBits = GfxBits;
+
+  RGBQUAD savedPalette[32];
+  memcpy(savedPalette,Palette,sizeof(Palette));
+
+  L9BYTE* savedGfxa5 = gfxa5;
+  int savedGintColour = gintcolour;
+  int savedOption = option;
+  int savedReflect = reflectflag;
+  int savedScale = scale;
+  int savedDrawX = drawx;
+  int savedDrawY = drawy;
+  int savedA5StackPos = GfxA5StackPos;
+  int savedScaleStackPos = GfxScaleStackPos;
+
+  tempDC = CreateCompatibleDC(savedGfxDC);
+  if (!tempDC)
+    goto done;
+
+  BYTE* bits = NULL;
+  tempBmp = CreateIndexedDib(tempDC,160,128,&bits);
+  if (!tempBmp || !bits)
+  {
+    if (tempBmp)
+      DeleteObject(tempBmp);
+    tempBmp = 0;
+    DeleteDC(tempDC);
+    tempDC = 0;
+    goto done;
+  }
+  oldTempBmp = (HBITMAP)SelectObject(tempDC,tempBmp);
+
+  hGfxDC = tempDC;
+  hGfx = tempBmp;
+  GfxBits = bits;
+  GfxBmapWidth = 160;
+  GfxBmapHeight = 128;
+  GfxPicWidth = 160;
+  GfxPicHeight = 128;
+  LastBitmap = -1;
+  DelayBitmap = 0;
+
+  show_picture(500);
+  while (RunGraphics())
+    ;
+
+  if (GfxPicWidth <= 0 || GfxPicHeight <= 0)
+    captured = FALSE;
+
+  if (captured)
+  {
+    ErikPanelWidth = GfxPicWidth;
+    ErikPanelHeight = GfxPicHeight;
+    int pixelCount = ErikPanelWidth * ErikPanelHeight;
+
+    ErikPanelBits = (BYTE*)malloc(pixelCount * 3);
+    if (!ErikPanelBits)
+    {
+      ErikPanelWidth = ErikPanelHeight = 0;
+      captured = FALSE;
+    }
+  }
+
+  if (captured)
+  {
+    int panelPixelWidth = ErikPanelWidth;
+    int captureStride = GfxBmapWidth;
+    int totalPixels = panelPixelWidth * ErikPanelHeight;
+    for (int pixelIndex = 0; pixelIndex < totalPixels; pixelIndex++)
+    {
+      BYTE paletteIndex = GfxBits[(pixelIndex / panelPixelWidth) * captureStride
+        + (pixelIndex % panelPixelWidth)];
+      RGBQUAD rgbFromPalette = Palette[(paletteIndex < 32) ? paletteIndex : 0];
+      int brightnessSum = (int)rgbFromPalette.rgbRed + (int)rgbFromPalette.rgbGreen + (int)rgbFromPalette.rgbBlue;
+      BYTE yellowOrBlack = (BYTE)(brightnessSum > 96 ? 255 : 0);
+      BYTE *destBgr = ErikPanelBits + pixelIndex * 3;
+      destBgr[0] = 0;
+      destBgr[1] = yellowOrBlack;
+      destBgr[2] = yellowOrBlack;
+    }
+  }
+  else
+    ErikPanelWidth = ErikPanelHeight = 0;
+
+  hGfxDC = savedGfxDC;
+  hGfx = savedGfx;
+  GfxBits = savedBits;
+  GfxBmapWidth = savedBmapWidth;
+  GfxBmapHeight = savedBmapHeight;
+  GfxPicWidth = savedWidth;
+  GfxPicHeight = savedHeight;
+  LastBitmap = savedBitmap;
+  DelayBitmap = savedDelay;
+  memcpy(Palette,savedPalette,sizeof(Palette));
+  gfxa5 = savedGfxa5;
+  gintcolour = savedGintColour;
+  option = savedOption;
+  reflectflag = savedReflect;
+  scale = savedScale;
+  drawx = savedDrawX;
+  drawy = savedDrawY;
+  GfxA5StackPos = savedA5StackPos;
+  GfxScaleStackPos = savedScaleStackPos;
+  GfxMode = savedGfxMode;
+  GfxBmapType = savedGfxBmapType;
+  l9textmode = savedL9TextMode;
+  screencalled = savedScreencalled;
+  gfx_mode = savedGfxModeCore;
+done:
+  if (tempDC && oldTempBmp)
+    SelectObject(tempDC,oldTempBmp);
+  if (tempBmp)
+    DeleteObject(tempBmp);
+  if (tempDC)
+    DeleteDC(tempDC);
+  ErikCapturing = FALSE;
+}
+
 void DrawPicture(void)
 {
   if (hGfxDC)
   {
+    int erikPanelX=0,erikPanelY=0,erikPanelW=0,erikPanelH=0,erikBarW=0,erikMainW=0;
+
     if (hGfxDrawDC == 0)
     {
       hGfxDrawDC = CreateCompatibleDC(hGfxDC);
       SetStretchBltMode(hGfxDrawDC,COLORONCOLOR);
-
-      BITMAPINFO32 info;
-      ZeroMemory(&info,sizeof(BITMAPINFO32));
-      info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-      info.bmiHeader.biPlanes = 1;
-      info.bmiHeader.biBitCount = 8;
-      info.bmiHeader.biCompression = BI_RGB;
-      info.bmiHeader.biWidth = PageWidth;
-      info.bmiHeader.biHeight = GfxHeight * -1;
-      info.bmiHeader.biClrUsed = 32;
-      info.bmiHeader.biClrImportant = 32;
-      SetIndexPalette(info.bmiColors);
-
-      VOID* bits;
-      hGfxDraw = CreateDIBSection(hGfxDrawDC,(BITMAPINFO*)&info,DIB_RGB_COLORS,&bits,NULL,0);
-      SelectObject(hGfxDrawDC,hGfxDraw);
+      BYTE* bits = NULL;
+      hGfxDraw = CreateIndexedDib(hGfxDrawDC,PageWidth,GfxHeight,&bits);
+      if (hGfxDraw)
+        SelectObject(hGfxDrawDC,hGfxDraw);
     }
 
     RGBQUAD pal[32];
     SetIndexPalette(pal);
     SetDIBColorTable(hGfxDrawDC,0,32,pal);
 
-    RECT rc;
-    rc.left = 0;
-    rc.right = PageWidth;
-    rc.top = 0;
-    rc.bottom = GfxHeight;
+    RECT rc = {0,0,PageWidth,GfxHeight};
     FillRect(hGfxDrawDC,&rc,(HBRUSH)GetStockObject(BLACK_BRUSH));
 
+    BOOL useErikSidePanelLayout = L9IsErik();
+    BOOL preserveLineGfxAspect = LineGfxPreserveAspect();
+    if (useErikSidePanelLayout)
+      CaptureErikPanel();
+
+    int w = PageWidth,h = GfxHeight,x = 0,y = 0;
     if (GfxMode == 2)
     {
-      int w = GfxPicWidth;
-      int h = GfxPicHeight;
+      w = GfxPicWidth;
+      h = GfxPicHeight;
 
       if (w < 512)
       {
@@ -717,55 +1115,114 @@ void DrawPicture(void)
       }
 
       if (GfxFitToWindow)
-      {
-        double aspect = (double)w / h;
-        double windowAspect = (double)PageWidth / GfxHeight;
+        ScalePictureToBox(PageWidth,GfxHeight,w,h,&w,&h);
 
-        if (windowAspect > aspect)
-        {
-          h = GfxHeight;
-          w = (int)(h * aspect);
-        }
-        else
-        {
-          w = PageWidth;
-          h = (int)(w / aspect);
-        }
-      }
-
-      int x = (PageWidth-w)/2;
-      int y = (GfxHeight-h)/2;
+      x = (PageWidth-w)/2;
+      y = (GfxHeight-h)/2;
       if (x < 0)
         x = 0;
-      if (y < 0)
-        y = 0;
-
-      StretchBlt(hGfxDrawDC,x,y,w,h,
-        hGfxDC,0,0,GfxPicWidth,GfxPicHeight,SRCCOPY);
+      ClampPictureVerticallyInGfx(y,h);
     }
-    else
+    else if (preserveLineGfxAspect && useErikSidePanelLayout)
     {
-      StretchBlt(hGfxDrawDC,0,0,PageWidth,GfxHeight,
-        hGfxDC,0,0,GfxPicWidth,GfxPicHeight,SRCCOPY);
+      double scaleErikRowToWindow = MinScaleToFit((double)PageWidth, (double)GfxHeight,
+        (double)GfxPicWidth * (1.0 + 364.0 / 598.0), (double)GfxPicHeight);
+      w = max(1,(int)(GfxPicWidth * scaleErikRowToWindow + 0.5));
+      h = max(1,(int)(GfxPicHeight * scaleErikRowToWindow + 0.5));
+      y = (GfxHeight - h) / 2;
+      ClampPictureVerticallyInGfx(y,h);
     }
+    else if (useErikSidePanelLayout)
+      w = max(1,(int)(PageWidth / (1.0 + 364.0 / 598.0) + 0.5));
+
+    int stretchDstX = x;
+    if (useErikSidePanelLayout)
+    {
+      int panelW = max(1,(int)(w * 0.2977 + 0.5));
+      int barW = max(1,(int)(w * 0.0067 + 0.5));
+      int erikLayoutTotalWidth = w + 2 * panelW + 2 * barW;
+      int startX = (PageWidth - erikLayoutTotalWidth) / 2;
+      if (startX < 0) startX = 0;
+      erikPanelX = startX;
+      erikPanelY = y;
+      erikPanelW = panelW;
+      erikPanelH = h;
+      erikBarW = barW;
+      erikMainW = w;
+      stretchDstX = startX + panelW + barW;
+    }
+
+    int stretchDstY = y;
+    int stretchW = w;
+    int stretchH = h;
+    BOOL useLineGfxLetterbox = preserveLineGfxAspect && !useErikSidePanelLayout;
+    if (useLineGfxLetterbox)
+    {
+      ScalePictureToBox(w,h,GfxPicWidth,GfxPicHeight,&stretchW,&stretchH);
+      stretchDstX += (w - stretchW) / 2;
+      stretchDstY += (h - stretchH) / 2;
+    }
+
+    StretchBlt(hGfxDrawDC,stretchDstX,stretchDstY,stretchW,stretchH,
+      hGfxDC,0,0,GfxPicWidth,GfxPicHeight,SRCCOPY);
 
     SetDIBColorTable(hGfxDrawDC,0,32,Palette);
-    HDC dc = GetDC(hWndMain);
-    BitBlt(dc,0,0,PageWidth,GfxHeight,hGfxDrawDC,0,0,SRCCOPY);
-    ReleaseDC(hWndMain,dc);
+
+    HDC wdc = GetDC(hWndMain);
+    HBRUSH gutterBrush = 0;
+    if (useErikSidePanelLayout && ErikPanelBits)
+    {
+      ErikPanelArtEnsure(wdc,erikPanelW,erikBarW,erikPanelH);
+      int rightPanelX = erikPanelX + erikPanelW + erikBarW + erikMainW;
+      int panelArtW = erikPanelW + erikBarW;
+      HDC mem = CreateCompatibleDC(wdc);
+      if (mem)
+      {
+        HBITMAP sidePanelBitmaps[2] = { ErikPanelLeft, ErikPanelRight };
+        int sidePanelScreenX[2] = { erikPanelX, rightPanelX };
+        int sideIndex;
+        for (sideIndex = 0; sideIndex < 2; sideIndex++)
+          if (sidePanelBitmaps[sideIndex])
+          {
+            SelectObject(mem,sidePanelBitmaps[sideIndex]);
+            BitBlt(wdc,sidePanelScreenX[sideIndex],erikPanelY,panelArtW,erikPanelH,mem,0,0,SRCCOPY);
+          }
+        DeleteDC(mem);
+      }
+      gutterBrush = CreateSolidBrush(BackColour);
+      DrawMainWithGutters(wdc,gutterBrush,hGfxDrawDC,erikPanelX,rightPanelX + panelArtW,
+        stretchDstX,stretchDstY,stretchW,stretchH);
+    }
+    else if (useLineGfxLetterbox || GfxMode == 2)
+    {
+      gutterBrush = CreateSolidBrush(BackColour);
+      DrawMainWithGutters(wdc,gutterBrush,hGfxDrawDC,stretchDstX,stretchDstX+stretchW,
+        stretchDstX,stretchDstY,stretchW,stretchH);
+    }
+    else
+      BitBlt(wdc,0,0,PageWidth,GfxHeight,hGfxDrawDC,0,0,SRCCOPY);
+    if (gutterBrush)
+      DeleteObject(gutterBrush);
+    ReleaseDC(hWndMain,wdc);
   }
 }
 
-FName GfxDir;
-BitmapType GfxBmapType = NO_BITMAPS;
-BYTE* GfxBits = NULL;
-int GfxBmapWidth = 0, GfxBmapHeight = 0;
-int LastBitmap = -1, DelayBitmap = 0;
+static void ShowDelayedBitmapNow(void)
+{
+  if (DelayBitmap > 0)
+  {
+    KillTimer(hWndMain,1);
+    int pic = DelayBitmap;
+    DelayBitmap = 0;
+    os_show_bitmap(pic,0,0);
+  }
+}
 
 void os_graphics(int mode)
 {
   GfxBmapType = NO_BITMAPS;
   LastBitmap = -1;
+  FreeErikPanelResources();
 
   switch (mode)
   {
@@ -785,13 +1242,13 @@ void os_graphics(int mode)
 
   Resize();
 
+  if (hGfxDC)
+    DeleteDC(hGfxDC);
+  hGfxDC = 0;
   if (hGfx)
     DeleteObject(hGfx);
   hGfx = 0;
   GfxBits = NULL;
-  if (hGfxDC)
-    DeleteDC(hGfxDC);
-  hGfxDC = 0;
 
   if (GfxMode)
   {
@@ -814,19 +1271,9 @@ void os_graphics(int mode)
       GfxPicHeight = GfxBmapHeight;
     }
 
-    BITMAPINFO32 info;
-    ZeroMemory(&info,sizeof(BITMAPINFO32));
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 8;
-    info.bmiHeader.biCompression = BI_RGB;
-    info.bmiHeader.biWidth = GfxBmapWidth;
-    info.bmiHeader.biHeight = GfxBmapHeight * -1;
-    info.bmiHeader.biClrUsed = 32;
-    info.bmiHeader.biClrImportant = 32;
-    SetIndexPalette(info.bmiColors);
-
-    hGfx = CreateDIBSection(hGfxDC,(BITMAPINFO*)&info,DIB_RGB_COLORS,(VOID**)&GfxBits,NULL,0);
+    BYTE* bits = NULL;
+    hGfx = CreateIndexedDib(hGfxDC,GfxBmapWidth,GfxBmapHeight,&bits);
+    GfxBits = bits;
     SelectObject(hGfxDC,hGfx);
   }
 }
@@ -1020,6 +1467,7 @@ public:
   void CmSelectBackColour();
   void CmToggleDither();
   void CmToggleFitToWindow();
+  void CmTogglePreserveAspect();
   void CmRestore() { HashCommand("#restore"); }
   void CmSave() { HashCommand("save"); }
   void CmDictionary() { HashCommand("#dictionary"); }
@@ -1068,6 +1516,7 @@ EV_START(MainWindow)
   EV_COMMAND(CM_BACKCOLOUR, CmSelectBackColour)
   EV_COMMAND(CM_DITHER, CmToggleDither)
   EV_COMMAND(CM_FITTOWINDOW, CmToggleFitToWindow)
+  EV_COMMAND(CM_PRESERVEASPECT, CmTogglePreserveAspect)
   EV_COMMAND(CM_FILELOAD, CmRestore)
   EV_COMMAND(CM_FILESAVE, CmSave)
   EV_COMMAND(CM_DICTIONARY, CmDictionary)
@@ -1147,6 +1596,7 @@ BOOL MainWindow::SetupWindow()
   SetBkColor(BackColour);
   CheckMenuItem(CM_DITHER,GfxDither);
   CheckMenuItem(CM_FITTOWINDOW,GfxFitToWindow);
+  CheckMenuItem(CM_PRESERVEASPECT,GfxPreserveAspect);
   Playing=FALSE;
 
   return TRUE;
@@ -1242,6 +1692,14 @@ void MainWindow::CmToggleFitToWindow()
   }
 }
 
+void MainWindow::CmTogglePreserveAspect()
+{
+  GfxPreserveAspect = !GfxPreserveAspect;
+  CheckMenuItem(CM_PRESERVEASPECT, GfxPreserveAspect);
+  if (GfxMode == 1)
+    DrawPicture();
+}
+
 void MainWindow::SetFont()
 {
   Font=CreateFontIndirect(&lf);
@@ -1275,6 +1733,7 @@ void MainWindow::UpdateFont()
 void MainWindow::Destroy()
 {
   // close help if open
+  FreeErikPanelResources();
   DelFonts();
   StopGame();
   Playing=FALSE;
@@ -1375,6 +1834,9 @@ void MainWindow::CmPaste()
 
 BOOL MainWindow::WMKeyDown(TMSG &Msg)
 {
+  if (DelayBitmap > 0)
+    ShowDelayedBitmapNow();
+
   bool ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
   bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
 
@@ -1412,6 +1874,9 @@ BOOL MainWindow::WMKeyDown(TMSG &Msg)
 
 BOOL MainWindow::WMChar(TMSG &Msg)
 {
+  if (DelayBitmap > 0)
+    ShowDelayedBitmapNow();
+
   if (isprint(Msg.wParam) || (Msg.wParam==8) || (Msg.wParam==13))
     InputChars.AddTail(Msg.wParam);
   return TRUE;
@@ -1464,12 +1929,7 @@ BOOL MainWindow::WMTimer(TMSG& Msg)
 {
   if (Msg.wParam == 1)
   {
-    KillTimer(hWndMain,1);
-
-    int pic = DelayBitmap;
-    DelayBitmap = 0;
-    if (pic > 0)
-      os_show_bitmap(pic,0,0);
+    ShowDelayedBitmapNow();
   }
   return TRUE;
 }
@@ -1561,6 +2021,7 @@ void MyApp::SetDefs()
   BackColour=GetSysOrDarkColour(COLOR_WINDOW);
 
   GfxDither=0;
+  GfxPreserveAspect=FALSE;
 }
 
 void MyApp::ReadIni()
@@ -1580,6 +2041,7 @@ void MyApp::ReadIni()
 
   ReadIniBool("Graphics","Dither",GfxDither);
   ReadIniBool("Graphics","FitToWindow",GfxFitToWindow);
+  ReadIniBool("Graphics","PreserveAspectRatio",GfxPreserveAspect);
 
   int wasDark = 0;
   ReadIniInt("General","WasInDarkMode",wasDark);
@@ -1604,6 +2066,7 @@ void MyApp::WriteIni()
 
   WriteIniBool("Graphics","Dither",GfxDither);
   WriteIniBool("Graphics","FitToWindow",GfxFitToWindow);
+  WriteIniBool("Graphics","PreserveAspectRatio",GfxPreserveAspect);
 }
 
 MyApp::MyApp(char *Name) : App(Name,Ini)
