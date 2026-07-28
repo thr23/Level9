@@ -105,7 +105,7 @@ BEGIN
         MENUITEM "&Background Colour...",       CM_BACKCOLOUR
         MENUITEM "&Dither Graphics Lines",      CM_DITHER
         MENUITEM "Fit Bitmaps to &Window",      CM_FITTOWINDOW
-        MENUITEM "&Aspect Line Graphics",       CM_PRESERVEASPECT
+        MENUITEM "Preserve Graphics &Aspect Ratio", CM_PRESERVEASPECT
     END
     POPUP "&Help"
     BEGIN
