@@ -1,8 +1,8 @@
 /***********************************************************************\
 *
 * Level 9 interpreter
-* Version 5.2
-* Copyright (c) 1996-2025 Glen Summers and contributors.
+* Version 5.3
+* Copyright (c) 1996-2026 Glen Summers and contributors.
 * Contributions from David Kinder, Alan Staniforth, Simon Baldwin,
 * Dieter Baron and Andreas Scherrer.
 *

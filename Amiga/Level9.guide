@@ -1,13 +1,13 @@
 @database Level9.guide
 @author "David Kinder"
-@$VER: Level9.guide 5.2 (25.05.2025)
+@$VER: Level9.guide 5.3 (28.07.2026)
 @node main "Level9"
 
-	Level 9 Interpreter v5.2
+	Level 9 Interpreter v5.3
 	An interpreter for Level 9 games in any format,
 	including Spectrum snapshots.
 
-        Copyright (c) 1996-2025 Glen Summers and contributors.
+        Copyright (c) 1996-2026 Glen Summers and contributors.
         Contributions from David Kinder, Alan Staniforth,
         Simon Baldwin, Dieter Baron and Andreas Scherrer.
 
@@ -231,6 +231,10 @@ The following menu options are available:
     @{b}Quit@{ub}	Immediately exits Level9. The current game will be lost.
 @endnode
 @node history "History"
+
+  v5.3  A further fix to the array overrun related to exit
+        commands has been made to address an invalid memory
+        access seen in "The Price of Magik".
 
   v5.2  An array overrun when handling the commands "forwards",
         "backwards", "left" or "right" has been fixed.

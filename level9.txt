@@ -1,9 +1,9 @@
 
-        Level 9 Interpreter v5.2
+        Level 9 Interpreter v5.3
         An interpreter for Level 9 games in any format,
         including Spectrum snapshots.
 
-        Copyright (c) 1996-2025 Glen Summers and contributors.
+        Copyright (c) 1996-2026 Glen Summers and contributors.
         Contributions from David Kinder, Alan Staniforth,
         Simon Baldwin, Dieter Baron and Andreas Scherrer.
 
@@ -231,6 +231,10 @@ Alt-H when playing a game to view a list of the available hotkeys.
 
 History
 -------
+
+  v5.3  A further fix to the array overrun related to exit
+        commands has been made to address an invalid memory
+        access seen in "The Price of Magik".
 
   v5.2  An array overrun when handling the commands "forwards",
         "backwards", "left" or "right" has been fixed.

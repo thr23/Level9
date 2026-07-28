@@ -1,8 +1,8 @@
 /***********************************************************************\
 *
 * Level 9 interpreter
-* Version 5.2
-* Copyright (c) 1996-2025 Glen Summers and contributors.
+* Version 5.3
+* Copyright (c) 1996-2026 Glen Summers and contributors.
 * Contributions from David Kinder, Alan Staniforth, Simon Baldwin,
 * Dieter Baron and Andreas Scherrer.
 *
@@ -60,7 +60,7 @@ struct NewMenu NewMenus[] =
   {NM_ITEM, "Quit", "Q", 0, 0, 0},
   {NM_END, 0, 0, 0, 0, 0}};
 
-char Version[] = "$VER:Level9 5.2 (25.05.2025)";
+char Version[] = "$VER:Level9 5.3 (28.07.2026)";
 char TitleBar[] = "Level 9";
 
 #define TEXTBUFFER_SIZE 1024
@@ -1031,8 +1031,8 @@ void help (void)
 
 void about (void)
 {
-  req ("Level 9 Interpreter v5.2\n"
-       "Copyright (c) 1996-2025 Glen Summers and contributors.\n"
+  req ("Level 9 Interpreter v5.3\n"
+       "Copyright (c) 1996-2026 Glen Summers and contributors.\n"
        "Contributions from David Kinder, Alan Staniforth,\n"
        "Simon Baldwin, Dieter Baron and Andreas Scherrer.\n\n"
        "Level9 is released under the terms of the GNU General\n"
